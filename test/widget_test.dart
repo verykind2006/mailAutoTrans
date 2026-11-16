@@ -1,8 +1,11 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:auto_trans_mail/mail/account.dart';
 import 'package:auto_trans_mail/mail/mail_service.dart';
-import 'package:enough_mail/enough_mail.dart';
 import 'package:auto_trans_mail/translate/text_tools.dart';
 import 'package:auto_trans_mail/ui/format.dart';
+import 'package:enough_mail/enough_mail.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -106,5 +109,68 @@ void main() {
     final copyParsed = MimeMessage.parseFromText(copy.message.renderMessage());
     expect(copyParsed.bcc!.first.email, 'secret@example.com');
     expect(copy.messageId, sent.messageId);
+  });
+
+  test('发信带附件：收信方能按原名取出原内容；中文正文不乱', () {
+    final a = Account(
+      email: 'me@example.com',
+      userName: 'me@example.com',
+      password: 'pw',
+      imapHost: 'i',
+      imapPort: 993,
+      smtpHost: 's',
+      smtpPort: 465,
+    );
+    final pdf = Uint8List.fromList(List.generate(3000, (i) => i % 256));
+    final built = buildOutgoing(
+      a,
+      OutgoingMail(
+        to: ['ana@example.es'],
+        subject: 'Presupuesto',
+        body: 'Adjunto el presupuesto. 附件是报价。',
+        attachments: [OutgoingAttachment(name: 'presupuesto cocina.pdf', data: pdf)],
+      ),
+    );
+    final parsed = MimeMessage.parseFromText(built.message.renderMessage());
+    expect(parsed.decodeTextPlainPart()!.trim(), 'Adjunto el presupuesto. 附件是报价。');
+    final infos = parsed.findContentInfo(disposition: ContentDisposition.attachment);
+    expect(infos.single.fileName, 'presupuesto cocina.pdf');
+    expect(infos.single.mediaType?.text, 'application/pdf');
+    expect(parsed.getPart(infos.single.fetchId)!.decodeContentBinary(), pdf);
+  });
+
+  test('中文附件名：发出去是合规编码，收信方解出来是原名', () {
+    final a = Account(
+      email: 'me@example.com',
+      userName: 'me@example.com',
+      password: 'pw',
+      imapHost: 'i',
+      imapPort: 993,
+      smtpHost: 's',
+      smtpPort: 465,
+    );
+    final built = buildOutgoing(
+      a,
+      OutgoingMail(
+        to: ['x@example.com'],
+        subject: 'Foto',
+        body: 'Hola',
+        attachments: [OutgoingAttachment(name: '微信图片_20261114124259_48_70.jpg', data: Uint8List(10))],
+      ),
+    );
+    final text = built.message.renderMessage();
+    // 整封信应该是纯 ASCII（中文都编码过了），不能有裸的中文字节
+    expect(text.codeUnits.every((c) => c < 0x80), isTrue);
+    final parsed = MimeMessage.parseFromText(text);
+    final info = parsed.findContentInfo(disposition: ContentDisposition.attachment).single;
+    expect(info.fileName, '微信图片_20261114124259_48_70.jpg');
+  });
+
+  test('收到的乱码文件名能还原；正常的西语名不动', () {
+    final garbled = String.fromCharCodes(utf8.encode('微信图片.jpg')); // UTF-8 字节被当成西欧字符读
+    expect(fixMojibake(garbled), '微信图片.jpg');
+    expect(fixMojibake('presupuesto_año.pdf'), 'presupuesto_año.pdf');
+    expect(fixMojibake('report.pdf'), 'report.pdf');
+    expect(fixMojibake('微信图片.jpg'), '微信图片.jpg');
   });
 }

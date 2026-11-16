@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:enough_mail/enough_mail.dart';
 
 import 'account.dart';
@@ -85,7 +88,23 @@ class MailDetail {
   final String? html;
   final String? plain;
   final String to;
-  final List<String> attachments; // 附件文件名
+  final List<MailAttachment> attachments; // 附件（内容已经取下来了）
+}
+
+/// 收到的信里的一个附件（内容在内存里）。
+class MailAttachment {
+  MailAttachment({required this.name, required this.mediaType, required this.data});
+  final String name;
+  final String mediaType; // 例如 application/pdf
+  final Uint8List data;
+  int get size => data.length;
+}
+
+/// 发信时带的一个附件。
+class OutgoingAttachment {
+  OutgoingAttachment({required this.name, required this.data});
+  final String name;
+  final Uint8List data;
 }
 
 /// 要发出的一封信（已经是翻译好的外语）。
@@ -98,7 +117,9 @@ class OutgoingMail {
     required this.body,
     this.inReplyTo,
     this.references,
+    this.attachments = const [],
   });
+  final List<OutgoingAttachment> attachments; // 附件
   final List<String> to; // 收件人邮箱地址
   final List<String> cc; // 抄送
   final List<String> bcc; // 密送（只在发给服务器的收件人名单里，信里不出现）
@@ -342,14 +363,11 @@ class MailService {
         } catch (_) {} // 标已读失败不影响读信
       }
       final to = (m.to ?? const <MailAddress>[]).map(_addr).join('、');
-      final attachments = m
-          .findContentInfo(disposition: ContentDisposition.attachment)
-          .map((i) => i.fileName ?? '（无名附件）')
-          .toList();
+      final attachments = _attachments(m);
       return MailDetail(
         summary: _summary(m),
         messageId: m.decodeHeaderValue('message-id')?.trim(),
-        html: m.decodeTextHtmlPart(),
+        html: _inlineImages(m, m.decodeTextHtmlPart()),
         plain: m.decodeTextPlainPart(),
         to: to,
         attachments: attachments,
@@ -414,6 +432,45 @@ class MailService {
       sentNote = '信已经发出，但存进「已发送」时出错：${describeError(e)}';
     }
     return SendResult(sentNote: sentNote);
+  }
+
+  /// 附件：标成 attachment 的，加上标成 inline 但有文件名、又不是正文里引用的图片的（有些软件把 PDF 标成 inline）
+  static List<MailAttachment> _attachments(MimeMessage m) {
+    final infos = [
+      ...m.findContentInfo(disposition: ContentDisposition.attachment),
+      ...m.findContentInfo(disposition: ContentDisposition.inline).where((i) => i.fileName != null && !i.isImage),
+    ];
+    final seen = <String>{};
+    final out = <MailAttachment>[];
+    for (final i in infos) {
+      if (!seen.add(i.fetchId)) continue;
+      final data = m.getPart(i.fetchId)?.decodeContentBinary();
+      if (data == null) continue;
+      final raw = (i.fileName ?? '').trim();
+      out.add(
+        MailAttachment(
+          name: raw.isEmpty ? '附件${out.length + 1}' : fixMojibake(raw),
+          mediaType: i.mediaType?.text ?? 'application/octet-stream',
+          data: data,
+        ),
+      );
+    }
+    return out;
+  }
+
+  /// HTML 正文里用 cid: 引用的内嵌图片（公司标志等）换成 data: 网址，WebView 才显示得出来
+  static String? _inlineImages(MimeMessage m, String? html) {
+    if (html == null || !html.contains('cid:')) return html;
+    var out = html;
+    for (final part in m.allPartsFlat) {
+      final cid = part.getHeaderValue('content-id')?.trim().replaceAll(RegExp(r'^<|>$'), '');
+      if (cid == null || cid.isEmpty || part.mediaType.top != MediaToptype.image) continue;
+      final data = part.decodeContentBinary();
+      if (data == null) continue;
+      final uri = 'data:${part.mediaType.text};base64,${base64Encode(data)}';
+      out = out.replaceAll(RegExp('cid:${RegExp.escape(cid)}', caseSensitive: false), uri);
+    }
+    return out;
   }
 
   MailSummary _summary(MimeMessage m) {
@@ -487,6 +544,9 @@ String describeError(Object e) {
   if (mail.cc.isNotEmpty) builder.cc = mail.cc.map((e) => MailAddress(null, e)).toList();
   if (includeBcc && mail.bcc.isNotEmpty) builder.bcc = mail.bcc.map((e) => MailAddress(null, e)).toList();
   if (messageId != null) builder.messageId = messageId;
+  for (final f in mail.attachments) {
+    builder.addBinary(f.data, MediaType.guessFromFileName(f.name), filename: encodeAttachmentName(f.name));
+  }
   if (mail.inReplyTo != null && mail.inReplyTo!.isNotEmpty) {
     builder.setHeader('In-Reply-To', mail.inReplyTo);
     final refs = [if (mail.references != null && mail.references!.isNotEmpty) mail.references!, mail.inReplyTo!];
@@ -494,4 +554,25 @@ String describeError(Object e) {
   }
   final message = builder.buildMimeMessage();
   return (message: message, messageId: builder.messageId);
+}
+
+/// 附件文件名写进信头前的编码。enough_mail 会把文件名原样写进 Content-Disposition，
+/// 中文等非英文字母就成了不合规的裸 UTF-8，收信方按西欧编码读 → 乱码（2026-11-16 用户截图：
+/// 「微信图片」显示成「å¾®ä¿¡å…」）。纯英文名不动；其他的用 RFC 2047 编码（=?UTF-8?B?…?=），
+/// Gmail / Outlook / Apple Mail 都认。
+String encodeAttachmentName(String name) {
+  final ascii = name.codeUnits.every((c) => c >= 0x20 && c < 0x7f && c != 0x22 && c != 0x5c);
+  return ascii ? name : MailCodec.base64.encodeHeader(name, fromStart: true);
+}
+
+/// 收到的文件名如果是「UTF-8 被当成西欧编码读」的乱码（别的软件或旧版本发的裸 UTF-8 文件名），还原回来。
+/// 只有全部字符都在 0–255、且按 UTF-8 能完整解开时才改，正常的西语名（如 presupuesto_año.pdf）不受影响。
+String fixMojibake(String name) {
+  final units = name.codeUnits;
+  if (units.every((c) => c < 0x80) || units.any((c) => c > 0xff)) return name;
+  try {
+    return utf8.decode(units, allowMalformed: false);
+  } on FormatException {
+    return name;
+  }
 }

@@ -2,6 +2,7 @@ import 'package:material_ui/material_ui.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import '../mail/account.dart';
+import '../mail/attachment_files.dart';
 import '../mail/mail_service.dart';
 import '../translate/html_translate.dart';
 import '../translate/text_tools.dart';
@@ -311,8 +312,12 @@ class _MessageViewState extends State<MessageView> {
                   if (_detail != null && _detail!.cc.isNotEmpty) Text('抄送：${_detail!.cc}', style: Kit.text),
                   Text('时间：${formatMailDate(s.date)}', style: Kit.caption),
                   if (_detail != null && _detail!.attachments.isNotEmpty) ...[
-                    const SizedBox(height: 6),
-                    Text('📎 附件：${_detail!.attachments.join('、')}', style: Kit.caption),
+                    const SizedBox(height: 12),
+                    Wrap(
+                      spacing: 10,
+                      runSpacing: 10,
+                      children: [for (final a in _detail!.attachments) _AttachmentChip(att: a)],
+                    ),
                   ],
                 ],
               ),
@@ -562,4 +567,85 @@ class _HtmlViewState extends State<_HtmlView> {
 
   @override
   Widget build(BuildContext context) => WebViewWidget(controller: _controller);
+}
+
+/// 一个附件：图标 + 文件名 + 大小，「打开」「存到下载」两个按钮
+class _AttachmentChip extends StatelessWidget {
+  const _AttachmentChip({required this.att});
+  final MailAttachment att;
+
+  IconData get _icon {
+    final t = att.mediaType;
+    if (t.contains('pdf')) return Icons.picture_as_pdf_rounded;
+    if (t.startsWith('image/')) return Icons.image_rounded;
+    if (t.contains('word') || t.contains('document')) return Icons.description_rounded;
+    if (t.contains('sheet') || t.contains('excel')) return Icons.table_chart_rounded;
+    if (t.contains('zip') || t.contains('compressed')) return Icons.folder_zip_rounded;
+    return Icons.attach_file_rounded;
+  }
+
+  void _snack(BuildContext context, String text, {SnackBarAction? action}) => ScaffoldMessenger.of(context)
+      .showSnackBar(
+        SnackBar(
+          content: Text(text, style: const TextStyle(fontSize: 18)),
+          action: action,
+        ),
+      );
+
+  Future<void> _open(BuildContext context) async {
+    try {
+      await AttachmentFiles.open(att.name, att.data);
+    } catch (e) {
+      if (context.mounted) _snack(context, '打不开：$e');
+    }
+  }
+
+  Future<void> _save(BuildContext context) async {
+    try {
+      final path = await AttachmentFiles.saveToDownloads(att.name, att.data);
+      if (context.mounted) {
+        _snack(
+          context,
+          '✓ 已存到「下载」：${path.split('/').last}',
+          action: SnackBarAction(label: '在访达中显示', onPressed: () => AttachmentFiles.reveal(path)),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) _snack(context, '保存失败：$e');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 6, 6, 6),
+      decoration: BoxDecoration(
+        color: Kit.canvas,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Kit.hairline),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(_icon, size: 26, color: const Color(0xFF1565C0)),
+          const SizedBox(width: 8),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 320),
+            child: Text(att.name, style: Kit.textBold, maxLines: 1, overflow: TextOverflow.ellipsis),
+          ),
+          const SizedBox(width: 8),
+          Text(AttachmentFiles.formatSize(att.size), style: Kit.caption),
+          const SizedBox(width: 6),
+          TextButton(
+            onPressed: () => _open(context),
+            child: const Text('打开', style: TextStyle(fontSize: 17)),
+          ),
+          TextButton(
+            onPressed: () => _save(context),
+            child: const Text('存到下载', style: TextStyle(fontSize: 17)),
+          ),
+        ],
+      ),
+    );
+  }
 }

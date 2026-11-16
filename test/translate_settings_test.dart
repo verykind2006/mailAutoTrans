@@ -42,4 +42,14 @@ void main() {
     expect(TranslateSettings(engine: Engine.local).configured, isFalse);
     expect(TranslateSettings(engine: Engine.local, localModelPath: '/m').configured, isTrue);
   });
+
+  test('模型回的 JSON 字符串里直接换行（Qwen2.5-7B 实测）也能解析', () {
+    const reply =
+        '好的：\n{"is_chinese":false,"subject_zh":"厨房装修报价单","body_zh":"安娜，\n\n我附上报价单：4850欧元。\n\n此致，\n路易斯","quoted_summary":""}';
+    final j = Translator.parseModelJson(reply);
+    expect(j['body_zh'], '安娜，\n\n我附上报价单：4850欧元。\n\n此致，\n路易斯');
+    expect(j['subject_zh'], '厨房装修报价单');
+    // 本来就合法、带转义的 JSON 不受影响
+    expect(Translator.parseModelJson(r'{"a":"x\ny \"q\""}')['a'], 'x\ny "q"');
+  });
 }

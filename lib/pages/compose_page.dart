@@ -1,7 +1,11 @@
+import 'dart:io';
+
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../mail/account.dart';
+import '../mail/attachment_files.dart';
 import '../mail/contacts.dart';
 import '../mail/mail_service.dart';
 import '../translate/translator.dart';
@@ -73,6 +77,7 @@ class _ComposeViewState extends State<ComposeView> {
   final _subjectOut = TextEditingController();
   final _bodyOut = TextEditingController();
   final _bodyZhFocus = FocusNode();
+  final List<({String name, String path, int size})> _files = []; // 要带的附件
   final _pageFocus = FocusNode();
 
   late Account _from = widget.account; // 从哪个邮箱发
@@ -86,8 +91,6 @@ class _ComposeViewState extends State<ComposeView> {
   bool _sending = false;
   _Source? _translatedFrom; // 当前译文是从哪段中文翻的
   DateTime? _translatedAt;
-  String _back = ''; // 译文直译回中文
-  bool _outEdited = false; // 改过译文
   String? _error;
 
   @override
@@ -145,7 +148,7 @@ class _ComposeViewState extends State<ComposeView> {
   /// 中文或语言改过了，现有译文作废
   bool get _stale => _translatedFrom == null || _translatedFrom != _current;
 
-  bool get _dirty => _bodyZh.text.trim().isNotEmpty || _bodyOut.text.trim().isNotEmpty;
+  bool get _dirty => _bodyZh.text.trim().isNotEmpty || _bodyOut.text.trim().isNotEmpty || _files.isNotEmpty;
 
   String? _validate() {
     final all = {'收件人': _split(_to.text), '抄送': _split(_cc.text), '密送': _split(_bcc.text)};
@@ -225,8 +228,6 @@ class _ComposeViewState extends State<ComposeView> {
       setState(() {
         _subjectOut.text = src.subject;
         _bodyOut.text = src.body;
-        _back = '';
-        _outEdited = false;
         _translatedFrom = src;
         _translatedAt = DateTime.now();
         _showRight = true;
@@ -259,8 +260,6 @@ class _ComposeViewState extends State<ComposeView> {
       setState(() {
         _subjectOut.text = t.subject;
         _bodyOut.text = t.body;
-        _back = t.backTranslation;
-        _outEdited = false;
         _translatedFrom = src;
         _translatedAt = DateTime.now();
       });
@@ -316,6 +315,9 @@ class _ComposeViewState extends State<ComposeView> {
           to: _split(_to.text),
           cc: _split(_cc.text),
           bcc: _split(_bcc.text),
+          attachments: [
+            for (final f in _files) OutgoingAttachment(name: f.name, data: await File(f.path).readAsBytes()),
+          ],
           subject: _subjectOut.text.trim(),
           body: _bodyOut.text.trim() + _quoted(),
           inReplyTo: r?.messageId,
@@ -369,8 +371,6 @@ class _ComposeViewState extends State<ComposeView> {
                         child: _error == null ? const SizedBox(width: double.infinity) : _errorBox(),
                       ),
                       const SizedBox(height: 16),
-                      _buttons(),
-                      const SizedBox(height: 8),
                     ],
                   ),
                 ),
@@ -382,25 +382,37 @@ class _ComposeViewState extends State<ComposeView> {
     );
   }
 
+  /// 顶部一行：关闭 · 标题 · 步骤 ……（右边）按钮。窗口窄时不显示步骤，给按钮让地方
   Widget _header(ReplyContext? r) {
     final step2 = _showRight;
-    return Row(
-      children: [
-        TextButton.icon(
-          onPressed: _sending ? null : _close,
-          icon: const Icon(Icons.close, size: 24),
-          label: const Text('关闭', style: TextStyle(fontSize: 18)),
-        ),
-        const SizedBox(width: 12),
-        Text(r == null ? '写邮件' : (r.replyAll ? '回复全部' : '回复'), style: Kit.pageTitle),
-        const SizedBox(width: 20),
-        _StepDot(n: 1, label: '写中文', active: !step2),
-        const Padding(
-          padding: EdgeInsets.symmetric(horizontal: 8),
-          child: Icon(Icons.chevron_right, color: Kit.inkSoft),
-        ),
-        _StepDot(n: 2, label: '核对译文并发送', active: step2),
-      ],
+    return LayoutBuilder(
+      builder: (context, box) => Row(
+        children: [
+          TextButton.icon(
+            onPressed: _sending ? null : _close,
+            icon: const Icon(Icons.close, size: 24),
+            label: const Text('关闭', style: TextStyle(fontSize: 18)),
+          ),
+          const SizedBox(width: 12),
+          Text(r == null ? '写邮件' : (r.replyAll ? '回复全部' : '回复'), style: Kit.pageTitle),
+          if (box.maxWidth > 1150 * MediaQuery.textScalerOf(context).scale(1)) ...[
+            const SizedBox(width: 20),
+            _StepDot(n: 1, label: '写中文', active: !step2),
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 8),
+              child: Icon(Icons.chevron_right, color: Kit.inkSoft),
+            ),
+            _StepDot(n: 2, label: '核对译文并发送', active: step2),
+          ],
+          // 按钮靠右；地方不够时整体略缩小，不会挤出界
+          Expanded(
+            child: Align(
+              alignment: Alignment.centerRight,
+              child: FittedBox(fit: BoxFit.scaleDown, alignment: Alignment.centerRight, child: _buttons()),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -509,9 +521,90 @@ class _ComposeViewState extends State<ComposeView> {
               ),
             ],
           ),
+          const SizedBox(height: 10),
+          _attachmentsRow(),
         ],
       ),
     );
+  }
+
+  /// 「附件」一行：添加按钮 + 已选的文件（可以删）+ 太大时提醒
+  Widget _attachmentsRow() {
+    final total = _files.fold<int>(0, (n, f) => n + f.size);
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Padding(
+          padding: EdgeInsets.only(top: 10),
+          child: SizedBox(width: 70, child: Text('附件', style: Kit.textBold)),
+        ),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  for (final f in _files)
+                    Container(
+                      padding: const EdgeInsets.fromLTRB(12, 4, 4, 4),
+                      decoration: BoxDecoration(
+                        color: Kit.canvas,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: Kit.hairline),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.attach_file_rounded, size: 20, color: Color(0xFF1565C0)),
+                          const SizedBox(width: 6),
+                          ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 280),
+                            child: Text(f.name, style: Kit.text, maxLines: 1, overflow: TextOverflow.ellipsis),
+                          ),
+                          const SizedBox(width: 8),
+                          Text(AttachmentFiles.formatSize(f.size), style: Kit.caption),
+                          IconButton(
+                            tooltip: '去掉这个附件',
+                            icon: const Icon(Icons.close_rounded, size: 20),
+                            onPressed: _sending ? null : () => setState(() => _files.remove(f)),
+                          ),
+                        ],
+                      ),
+                    ),
+                  OutlinedButton.icon(
+                    onPressed: _sending ? null : _pickFiles,
+                    icon: const Icon(Icons.add_rounded, size: 22),
+                    label: const Text('添加附件'),
+                  ),
+                ],
+              ),
+              if (total > 20 * 1024 * 1024)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(
+                    '⚠ 附件一共 ${AttachmentFiles.formatSize(total)}，很多邮箱收不了超过 20 MB 的信，可能发不出去。',
+                    style: const TextStyle(fontSize: 17, color: Color(0xFF7A3E00), fontWeight: FontWeight.w600),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _pickFiles() async {
+    final picked = await openFiles(confirmButtonText: '添加');
+    if (picked.isEmpty || !mounted) return;
+    final added = <({String name, String path, int size})>[];
+    for (final x in picked) {
+      if (_files.any((f) => f.path == x.path)) continue; // 同一个文件不重复加
+      added.add((name: x.name, path: x.path, size: await x.length()));
+    }
+    if (mounted) setState(() => _files.addAll(added));
   }
 
   /// 左：中文豆腐块（一直在）；右：译文栏（滑出 / 收起，有动画）
@@ -530,16 +623,22 @@ class _ComposeViewState extends State<ComposeView> {
             return Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                SizedBox(width: w - rightW, child: _chineseCard()),
+                SizedBox(key: const ValueKey('zh'), width: w - rightW, child: _chineseCard()),
+                // 右栏：内容始终按「半宽」排版，外面用 Align 的 widthFactor 只露出 t 那么宽（滑出效果）。
+                // 不能用 OverflowBox：它在可滚动区域里会被撑成无限高，整页排版出错
+                // （2026-11-16 用户截图：红色报错 + 中文卡片消失，test/compose_flow_test.dart 复现）。
                 if (t > 0.001)
-                  SizedBox(
-                    width: rightW,
-                    child: ClipRect(
-                      child: OverflowBox(
-                        alignment: Alignment.topRight,
-                        minWidth: half,
-                        maxWidth: half,
-                        child: Opacity(opacity: t, child: _rightColumn()),
+                  ClipRect(
+                    key: const ValueKey('out'),
+                    child: Align(
+                      alignment: Alignment.topLeft,
+                      widthFactor: t,
+                      child: SizedBox(
+                        width: half + gap,
+                        child: Padding(
+                          padding: const EdgeInsets.only(left: gap),
+                          child: Opacity(opacity: t, child: _rightColumn()),
+                        ),
                       ),
                     ),
                   ),
@@ -594,7 +693,7 @@ class _ComposeViewState extends State<ComposeView> {
           : Column(
               key: const ValueKey('result'),
               crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [_outCard(), if (_lang != TargetLang.zh || _back.isNotEmpty) _checkCard()],
+              children: [_outCard()],
             ),
     );
   }
@@ -614,7 +713,6 @@ class _ComposeViewState extends State<ComposeView> {
             controller: _subjectOut,
             style: Kit.textBold,
             enabled: !_sending,
-            onChanged: (_) => setState(() => _outEdited = true),
             decoration: const InputDecoration(labelText: '标题'),
           ),
           const SizedBox(height: 16),
@@ -625,7 +723,6 @@ class _ComposeViewState extends State<ComposeView> {
             minLines: 12,
             maxLines: null,
             keyboardType: TextInputType.multiline,
-            onChanged: (_) => setState(() => _outEdited = true),
             decoration: const InputDecoration(labelText: '正文', alignLabelWithHint: true),
           ),
           if (widget.reply != null) ...[
@@ -633,35 +730,6 @@ class _ComposeViewState extends State<ComposeView> {
             const Text('↩ 发出时会在正文下面自动附上对方原信的引用。', style: Kit.caption),
           ],
         ],
-      ),
-    );
-  }
-
-  Widget _checkCard() {
-    return Padding(
-      padding: const EdgeInsets.only(top: 12),
-      child: Container(
-        padding: const EdgeInsets.all(20),
-        decoration: BoxDecoration(
-          color: const Color(0xFFFFF8E1),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: const Color(0xFFF2D27A)),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('🔍 译文的中文意思（核对用，不会发出去）', style: Kit.cardTitle),
-            const SizedBox(height: 10),
-            Text(_back.isEmpty ? '（没有给出）' : _back, style: Kit.text),
-            if (_outEdited) ...[
-              const SizedBox(height: 10),
-              const Text(
-                '⚠ 你改过上面的译文，这段核对用的中文还是改之前的。',
-                style: TextStyle(fontSize: 17, color: Color(0xFF7A3E00), fontWeight: FontWeight.w600),
-              ),
-            ],
-          ],
-        ),
       ),
     );
   }
@@ -699,7 +767,7 @@ class _ComposeViewState extends State<ComposeView> {
         ? FilledButton.icon(
             key: const ValueKey('send'),
             onPressed: busy ? null : _send,
-            style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 18)),
+            style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 26, vertical: 16)),
             icon: _sending
                 ? const SizedBox(
                     width: 20,
@@ -712,7 +780,7 @@ class _ComposeViewState extends State<ComposeView> {
         : FilledButton.icon(
             key: const ValueKey('translate'),
             onPressed: busy ? null : _translate,
-            style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 18)),
+            style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 26, vertical: 16)),
             icon: _translating
                 ? const SizedBox(
                     width: 20,
@@ -726,26 +794,21 @@ class _ComposeViewState extends State<ComposeView> {
             ),
           );
     return Row(
+      mainAxisSize: MainAxisSize.min,
       children: [
         AnimatedSwitcher(duration: const Duration(milliseconds: 200), child: primary),
         const SizedBox(width: 12),
         const _KeyHint(keys: '⌘ ↩'),
-        const SizedBox(width: 20),
         if (_showRight) ...[
+          const SizedBox(width: 16),
           OutlinedButton(onPressed: _sending ? null : _escape, child: const Text('← 回去改中文')),
-          const SizedBox(width: 12),
+          const SizedBox(width: 8),
           const _KeyHint(keys: 'Esc'),
           if (canSend && _lang != TargetLang.zh) ...[
-            const SizedBox(width: 20),
+            const SizedBox(width: 16),
             OutlinedButton(onPressed: busy ? null : _retranslate, child: const Text('重新翻译')),
           ],
-        ] else
-          Flexible(
-            child: Text(
-              _lang == TargetLang.zh ? '直接发中文，下一步核对后发送' : '翻成${_lang.title}，翻完先给你核对，不会直接发出',
-              style: Kit.caption,
-            ),
-          ),
+        ],
       ],
     );
   }
