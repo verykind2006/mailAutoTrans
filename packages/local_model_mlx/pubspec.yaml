@@ -1,0 +1,18 @@
+name: local_model_mlx
+description: "MailAutoTrans 的本机翻译模型（Mac，MLX）。只在本项目内用，不发布。"
+version: 0.0.1
+publish_to: none
+
+environment:
+  sdk: ^3.14.0
+  flutter: '>=3.3.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      macos:
+        pluginClass: LocalModelMlxPlugin

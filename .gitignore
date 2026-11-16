@@ -1,0 +1,12 @@
+# 项目说明里有家人信息，不进仓库
+CLAUDE.md
+.DS_Store
+# Flutter / Dart 生成物
+build
+.dart_tool
+.flutter-plugins
+.flutter-plugins-dependencies
+*.iml
+.idea/
+packages/*/.dart_tool
+packages/*/build
